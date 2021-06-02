@@ -19,7 +19,10 @@
 	-diff = differential backup
 	
 .NOTES
-	Run daily from task scheduler with administrator privileges 
+	* Run daily from task scheduler with administrator privileges 
+	* Requires: Macrium Reflect 7+
+	* Requires: web server
+	* Requires: YoURLs short link creator
 	
 .EXAMPLE
 	PS C:\Windows\system32> C:\scripts\Reflect\DailyBackup.ps1 -diff
