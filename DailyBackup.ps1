@@ -7,34 +7,45 @@
 	Script to run and send notifications for Macrium Reflect
 
 .FUNCTIONALITY
+	* Frees up space on target drive if necessary
 	* Runs Macrium Reflect using specified XML config
 	* Copies Macrium html log file to webserver
 	* Creates short link to log file
 	* Emails report with link to log file
 
 .PARAMETER 
-	-s 
-	-full = full backup
-	-inc  = incremental backup
-	-diff = differential backup
+	-s      = ?
+	-full   = full backup
+	-inc    = incremental backup
+	-diff   = differential backup
+	[empty] = clone
 	
 .NOTES
-	* Run daily from task scheduler with administrator privileges 
-	* Requires: Macrium Reflect 7+
-	* Requires: web server
-	* Requires: YoURLs short link creator
+	Run daily from task scheduler with administrator privileges 
 	
 .EXAMPLE
 	PS C:\Windows\system32> C:\scripts\Reflect\DailyBackup.ps1 -diff
 
 #>
 
+
 <###   SCRIPT PARAMETERS   ###>
 Param([switch]$s, [switch]$full, [switch]$inc, [switch]$diff)
 
+
 <###   USER VARIABLES   ###>
+
+<#  Reflect Variables  #>
 $strReflectPath    = "C:\Program Files\Macrium\Reflect\reflect.exe"
-$strXmlFilePath    = "C:\Users\user\Documents\Reflect\DailyBackup.xml"
+$strXmlFilePath    = "C:\Users\User\Documents\Reflect\DailyBackup.xml"
+
+<#  AutoDelete Variables  #>
+$DoDelete          = $True         # For testing - set to false to run and report without deleting any old image files
+$ImageDir          = "D:\Images"   # Target folder for backup images
+$BackupsToKeep     = 3             # How many differential files should be kept
+$Safety            = 2             # Multiplier of largest file size - used to compare to drive free space to ensure image target drive has enough free space to fit new backup image
+
+<#  Email Variables  #>
 $EmailFrom         = "notify@mydomain.tld"
 $EmailTo           = "admin@mydomain.tld"
 $Subject           = "Macrium Nightly Backup"
@@ -42,17 +53,19 @@ $SMTPServer        = "mydomain.tld"
 $SMTPAuthUser      = "notify@mydomain.tld"
 $SMTPAuthPass      = "supersecretpassword"
 $SMTPPort          =  587
-$SSL               = $True                                  # If true, will use tls connection to send email
-$UseHTML           = $True                                  # If true, will format and send email body as html (with color!)
-$AttachDebugLog    = $True                                  # If true, will attach debug log to email report - must also select $VerboseFile
-$MaxAttachmentSize = 1                                      # Size in MB
-$MacriumLogDir     = "C:\ProgramData\Macrium\Reflect"       # Default location - change if necessary
-$WebDir            = "C:\xampp\htdocs\mydomain.tld\maclog"  # File location of web dir to place log files for online viewing
+$SSL               = $True         # If true, will use tls connection to send email
+$UseHTML           = $True         # If true, will format and send email body as html (with color!)
+
+<#  Log Variables  #>
+$MacriumLogDir     = "C:\ProgramData\Macrium\Reflect"       # Default location
+$WebDir            = "X:\xampp\htdocs\mydomain.tld\maclog"  # File location of web dir to place log files for online viewing
 $WebBaseURL        = "https://maclog.mydomain.tld/"         # Please leave trailing slash "/"
 $YoURLsToken       = 'secrettoken'                          # YoURLs API token
 $YoURLsURI         = 'https://url.mydomain.tld'             # YoURLs Base URL
 
+
 <###   FUNCTIONS   ###>
+
 Function Email ($EmailOutput) {
 	If ($UseHTML){
 		If ($EmailOutput -match "\[OK\]") {$EmailOutput = $EmailOutput -Replace "\[OK\]","<span style=`"background-color:green;color:white;font-weight:bold;font-family:Courier New;`">[OK]</span>"}
@@ -66,6 +79,7 @@ Function Email ($EmailOutput) {
 }
 
 Function EmailResults {
+	If ($UseHTML) {Write-Output "</table></body></html>" | Out-File $EmailBody -Encoding ASCII -Append}
 	Try {
 		$Body = (Get-Content -Path $EmailBody | Out-String )
 		$Message = New-Object System.Net.Mail.Mailmessage $EmailFrom, $EmailTo, $Subject, $Body
@@ -124,13 +138,78 @@ Function GetBackupTypeParameter(){
 	return ''; # Clone
 }
 
+Function AutoDelete {
+	$LargestBackup = (Get-ChildItem $ImageDir | Sort-Object -Descending -Property Length | Select -First 1).Length
+	$Drive = "DeviceID='" + $ImageDir.Substring(0,1) + ":'"
+	$Disk = Get-WmiObject Win32_LogicalDisk -Filter $Drive | Foreach-Object {
+		$Size = $_.Size
+		$Free = $_.FreeSpace
+	}
+
+	If ($Free -gt ($LargestBackup * $Safety)) {
+		Email "[OK] Adequate disk space"
+		$Return = $False
+	} Else {
+		Email "[INFO] Backup image removal:"
+		Get-ChildItem $ImageDir | Group-Object -Property { $_.Name.Substring(0, 16) } | Sort-Object -Descending -Property LastWriteTime | ForEach {
+			$GroupName = $_.Name
+			$GroupName | ForEach {
+				$GroupFiles = Get-ChildItem $ImageDir | Where {$_.Name -match ($GroupName)} | Sort-Object -Descending -Property LastWriteTime 
+				$GroupCount = $GroupFiles.Count
+				$N = 0
+				ForEach ($File in $GroupFiles) {
+					If (($N -gt ($BackupsToKeep - 1)) -and ($N -lt ($GroupCount - 1))) {
+						If ($DoDelete) {Remove-Item $File.FullName}
+					}
+					$N++
+				}
+			}
+		}
+		$Return = $True
+	}
+	Start-Sleep -Seconds 2
+	Return $Return
+}
+
+Function AutoDeleteSet {
+	$LargestBackup = (Get-ChildItem $ImageDir | Sort-Object -Descending -Property Length | Select -First 1).Length
+	$Drive = "DeviceID='" + $ImageDir.Substring(0,1) + ":'"
+	$Disk = Get-WmiObject Win32_LogicalDisk -Filter $Drive | Foreach-Object {
+		$Size = $_.Size
+		$Free = $_.FreeSpace
+	}
+
+	If ($Free -gt ($LargestBackup * $Safety)) {
+		Email "[OK] Adequate disk space"
+		$Return = $False
+	} Else {
+		Email "[INFO] Backup image set removal"
+		Get-ChildItem $ImageDir | Group-Object -Property { $_.Name.Substring(0, 16) } | Sort-Object -Descending -Property LastWriteTime | Select -Last 1 | ForEach {
+			$GroupName = $_.Name
+			$GroupName | ForEach {
+				$GroupFiles = Get-ChildItem $ImageDir | Where {$_.Name -match ($GroupName)} | Sort-Object -Descending -Property LastWriteTime | ForEach {
+					If ($DoDelete) {
+						Email "Deleted Image: $($_.Name)"
+						Remove-Item $_.FullName
+					} Else {
+						Email "TEST ONLY: Deleted Image: $($_.Name)"
+					}
+				}
+			}
+		}
+		$Return = $True
+	}
+	Start-Sleep -Seconds 2
+	Return $Return
+}
+
 
 <###   START SCRIPT   ###>
 
 $StartScript = Get-Date
 $DateString = (Get-Date).ToString("yyyy-MM-dd")
 
-<#  Delete old debug files and create new  #>
+<#  Delete old email and create new  #>
 $EmailBody = "$PSScriptRoot\EmailBody.log"
 If (Test-Path $EmailBody) {Remove-Item -Force -Path $EmailBody}
 New-Item $EmailBody
@@ -152,12 +231,49 @@ If ($UseHTML) {
 	Email " "
 }
 
-<#  Execute backup  #>
 Email "Macrium Reflect Backup Definition File:"
 Email "$strXmlFilePath"
 Email " "
+
+
+<###   AUTODELETE OLD IMAGE FILES   ###>
+
+If (-not($inc)) {
+	$DeleteMore = AutoDelete
+	If ($DeleteMore) {
+		$DeleteEvenMore = AutoDeleteSet
+		If ($DeleteEvenMore) {
+			$DeleteLastTry = AutoDeleteSet
+			If ($DeleteLastTry) {
+				Email "[ERROR] Could not remove enough files to free up space for new backup image. Quitting Script."
+				EmailResults
+				Exit
+			}
+		}
+	}
+} Else {
+	$DeleteEvenMore = AutoDeleteSet
+	If ($DeleteEvenMore) {
+		$DeleteLastTry = AutoDeleteSet
+		If ($DeleteLastTry) {
+			Email "[ERROR] Could not remove enough files to free up space for new backup image. Quitting Script."
+			EmailResults
+			Exit
+		}
+	}
+}	
+
+
+<###   RUN BACKUP   ###>
+
 $iExitCode = Backup
+
+$LastBackup = Get-ChildItem $ImageDir | Sort LastWriteTime -Descending | Select -First 1
+$LastBackupName = $LastBackup.Name
+$LastBackupSize = $("{0:N2}" -f (($LastBackup.Length)/1GB))
+
 Email " "
+Email "Created image $LastBackupName : $LastBackupSize GB"
 Email "Script finished with exit code $iExitCode."
 
 <#  Finish up and send email  #>
@@ -166,7 +282,6 @@ Email " "
 $LogURILong = CopyLogFile
 $LogURIShort = $LogURILong -Replace "https://", ""
 If ($UseHTML) { Email "Debug Log: <a href=`"$LogURILong`">$LogURIShort</a>" } Else { Email "Debug Log: $LogURILong" }
-If ($UseHTML) {Write-Output "</table></body></html>" | Out-File $EmailBody -Encoding ASCII -Append}
 EmailResults
 
 <#  Exit with exit code  #>
